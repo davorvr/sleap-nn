@@ -135,9 +135,9 @@ jobs:
           echo "=== Running pytest ==="
           uv run --frozen --extra torch-cpu pytest --cov=sleap_nn --cov-report=xml --durations=-1 tests/
 
-      - name: Upload coverage
-        uses: codecov/codecov-action@v5
-        with:
-          fail_ci_if_error: true
-          verbose: false
-          token: ${{ secrets.CODECOV_TOKEN }}
+#      - name: Upload coverage
+#        uses: codecov/codecov-action@v5
+#        with:
+#          fail_ci_if_error: true
+#          verbose: false
+#          token: ${{ secrets.CODECOV_TOKEN }}
