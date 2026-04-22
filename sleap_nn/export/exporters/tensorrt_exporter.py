@@ -18,7 +18,7 @@ def export_to_tensorrt(
     min_shape: Optional[Tuple[int, int, int, int]] = None,
     opt_shape: Optional[Tuple[int, int, int, int]] = None,
     max_shape: Optional[Tuple[int, int, int, int]] = None,
-    workspace_size: int = 2 << 30,  # 2GB default
+    workspace_size: int = 8 << 30,  # 8GB default
     method: str = "onnx",
     verbose: bool = True,
 ) -> Path:
@@ -37,7 +37,7 @@ def export_to_tensorrt(
         min_shape: Minimum input shape for dynamic shapes (default: batch=1, H/W halved).
         opt_shape: Optimal input shape (default: same as input_shape).
         max_shape: Maximum input shape (default: batch=16, H/W doubled).
-        workspace_size: TensorRT workspace size in bytes (default 2GB).
+        workspace_size: TensorRT workspace size in bytes (default 8GB).
         method: Compilation method - "onnx" or "jit".
         verbose: Print export info.
 
