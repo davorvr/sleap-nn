@@ -100,6 +100,7 @@ def export(
         resolve_input_channels,
         resolve_input_scale,
         resolve_input_shape,
+        resolve_max_stride,
         resolve_model_type,
         resolve_n_classes,
         resolve_node_names,
@@ -168,6 +169,7 @@ def export(
             input_scale if input_scale is not None else resolve_input_scale(cfg)
         )
         output_stride = resolve_output_stride(cfg, model_type)
+        max_stride = resolve_max_stride(cfg)
         resolved_crop_size = (
             (crop_size, crop_size) if crop_size is not None else resolve_crop_size(cfg)
         )
@@ -182,6 +184,7 @@ def export(
                 max_instances=max_instances,
                 output_stride=output_stride,
                 input_scale=resolved_scale,
+                max_stride=max_stride,
                 peak_threshold=peak_threshold,
             )
             output_names = ["centroids", "centroid_vals", "instance_valid"]
@@ -193,6 +196,7 @@ def export(
                 torch_model,
                 output_stride=output_stride,
                 input_scale=resolved_scale,
+                max_stride=max_stride,
                 peak_threshold=peak_threshold,
             )
             output_names = ["peaks", "peak_vals"]
@@ -213,6 +217,7 @@ def export(
                 max_edge_length_ratio=max_edge_length_ratio,
                 dist_penalty_weight=dist_penalty_weight,
                 input_scale=resolved_scale,
+                max_stride=max_stride,
                 peak_threshold=peak_threshold,
             )
             output_names = [
@@ -228,6 +233,7 @@ def export(
                 torch_model,
                 output_stride=output_stride,
                 input_scale=resolved_scale,
+                max_stride=max_stride,
                 peak_threshold=peak_threshold,
             )
             output_names = ["peaks", "peak_vals"]
@@ -240,6 +246,7 @@ def export(
                 torch_model,
                 output_stride=output_stride,
                 input_scale=resolved_scale,
+                max_stride=max_stride,
                 n_classes=n_classes,
                 peak_threshold=peak_threshold,
             )
@@ -262,6 +269,7 @@ def export(
                 cms_output_stride=output_stride,
                 class_maps_output_stride=class_maps_output_stride,
                 input_scale=resolved_scale,
+                max_stride=max_stride,
                 peak_threshold=peak_threshold,
             )
             output_names = ["peaks", "peak_vals", "peak_mask", "class_probs"]
@@ -459,6 +467,8 @@ def export(
         )
         centroid_stride = resolve_output_stride(centroid_cfg, "centroid")
         instance_stride = resolve_output_stride(instance_cfg, "centered_instance")
+        centroid_max_stride = resolve_max_stride(centroid_cfg)
+        instance_max_stride = resolve_max_stride(instance_cfg)
 
         resolved_crop = resolve_crop_size(instance_cfg)
         if crop_size is not None:
@@ -481,6 +491,8 @@ def export(
             instance_output_stride=instance_stride,
             centroid_input_scale=centroid_scale,
             instance_input_scale=instance_scale,
+            centroid_max_stride=centroid_max_stride,
+            instance_max_stride=instance_max_stride,
             n_nodes=len(node_names),
             centroid_peak_threshold=peak_threshold,
             instance_peak_threshold=peak_threshold,
@@ -664,6 +676,8 @@ def export(
         )
         centroid_stride = resolve_output_stride(centroid_cfg, "centroid")
         instance_stride = resolve_output_stride(instance_cfg, "multi_class_topdown")
+        centroid_max_stride = resolve_max_stride(centroid_cfg)
+        instance_max_stride = resolve_max_stride(instance_cfg)
 
         resolved_crop = resolve_crop_size(instance_cfg)
         if crop_size is not None:
@@ -688,6 +702,8 @@ def export(
             instance_output_stride=instance_stride,
             centroid_input_scale=centroid_scale,
             instance_input_scale=instance_scale,
+            centroid_max_stride=centroid_max_stride,
+            instance_max_stride=instance_max_stride,
             n_nodes=len(node_names),
             n_classes=n_classes,
             centroid_peak_threshold=peak_threshold,

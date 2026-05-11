@@ -27,6 +27,8 @@ class TopDownONNXWrapper(BaseExportWrapper):
         instance_output_stride: int = 4,
         centroid_input_scale: float = 1.0,
         instance_input_scale: float = 1.0,
+        centroid_max_stride: int = 1,
+        instance_max_stride: int = 1,
         n_nodes: int = 1,
         centroid_peak_threshold: float = 0.2,
         instance_peak_threshold: float = 0.2,
@@ -42,6 +44,8 @@ class TopDownONNXWrapper(BaseExportWrapper):
             instance_output_stride: Instance model output stride.
             centroid_input_scale: Centroid input scaling factor.
             instance_input_scale: Instance input scaling factor.
+            centroid_max_stride: Pad centroid input dimensions to this stride.
+            instance_max_stride: Pad instance input dimensions to this stride.
             n_nodes: Number of skeleton nodes.
             centroid_peak_threshold: Minimum confidence for centroid peaks.
             instance_peak_threshold: Minimum confidence for instance peaks.
@@ -55,6 +59,8 @@ class TopDownONNXWrapper(BaseExportWrapper):
         self.instance_output_stride = instance_output_stride
         self.centroid_input_scale = centroid_input_scale
         self.instance_input_scale = instance_input_scale
+        self.centroid_max_stride = centroid_max_stride
+        self.instance_max_stride = instance_max_stride
         self.n_nodes = n_nodes
         self.centroid_peak_threshold = centroid_peak_threshold
         self.instance_peak_threshold = instance_peak_threshold
@@ -71,16 +77,9 @@ class TopDownONNXWrapper(BaseExportWrapper):
         image = self._normalize_uint8(image)
         batch_size, channels, height, width = image.shape
 
-        scaled_image = image
-        if self.centroid_input_scale != 1.0:
-            scaled_h = int(height * self.centroid_input_scale)
-            scaled_w = int(width * self.centroid_input_scale)
-            scaled_image = F.interpolate(
-                scaled_image,
-                size=(scaled_h, scaled_w),
-                mode="bilinear",
-                align_corners=False,
-            )
+        scaled_image = self._resize_and_pad(
+            image, self.centroid_input_scale, self.centroid_max_stride
+        )
 
         centroid_out = self.centroid_model(scaled_image)
         centroid_cms = self._extract_tensor(centroid_out, ["centroid", "confmap"])
@@ -100,15 +99,9 @@ class TopDownONNXWrapper(BaseExportWrapper):
             self.crop_size[1],
         )
 
-        if self.instance_input_scale != 1.0:
-            scaled_h = int(self.crop_size[0] * self.instance_input_scale)
-            scaled_w = int(self.crop_size[1] * self.instance_input_scale)
-            crops_flat = F.interpolate(
-                crops_flat,
-                size=(scaled_h, scaled_w),
-                mode="bilinear",
-                align_corners=False,
-            )
+        crops_flat = self._resize_and_pad(
+            crops_flat, self.instance_input_scale, self.instance_max_stride
+        )
 
         instance_out = self.instance_model(crops_flat)
         instance_cms = self._extract_tensor(
