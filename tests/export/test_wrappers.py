@@ -41,6 +41,26 @@ class TestBaseExportWrapperNormalize:
         assert torch.allclose(result, expected)
 
 
+class TestBaseExportWrapperPreprocessing:
+    """Tests for exported image resize/pad preprocessing."""
+
+    def test_resize_and_pad_to_stride(self):
+        """Unscaled images are padded on right/bottom to stride multiples."""
+        image = torch.zeros(1, 1, 15, 17)
+        result = BaseExportWrapper._resize_and_pad(
+            image, input_scale=1.0, max_stride=16
+        )
+
+        assert result.shape == (1, 1, 16, 32)
+
+    def test_resize_then_pad_to_stride(self):
+        """Scaled images are padded after resizing."""
+        image = torch.zeros(1, 1, 20, 30)
+        result = BaseExportWrapper._resize_and_pad(image, input_scale=0.5, max_stride=8)
+
+        assert result.shape == (1, 1, 16, 16)
+
+
 class TestBaseExportWrapperExtractTensor:
     """Tests for _extract_tensor method."""
 
