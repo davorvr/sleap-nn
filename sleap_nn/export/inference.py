@@ -26,6 +26,8 @@ import sleap_io as sio
 import torch
 from omegaconf import OmegaConf
 
+from sleap_nn.data.normalization import convert_to_grayscale, convert_to_rgb
+from sleap_nn.data.resizing import apply_sizematcher
 from sleap_nn.export.metadata import ExportMetadata
 from sleap_nn.export.predictors import load_exported_model
 from sleap_nn.export.utils import build_bottomup_candidate_template
@@ -37,17 +39,25 @@ from sleap_nn.inference.utils import get_skeleton_from_config
 # ---------------------------------------------------------------------------
 
 
-def load_video_batch(video, frame_indices):
+def load_video_batch(
+    video, frame_indices, preprocessing_config=None, return_eff_scales=False
+):
     """Load a batch of video frames as a uint8 NCHW numpy array.
 
     Args:
         video: ``sleap_io.Video`` object.
         frame_indices: Iterable of integer frame indices to load.
+        preprocessing_config: Optional dict with ``max_height``, ``max_width``,
+            ``ensure_rgb``, and ``ensure_grayscale`` keys. When provided, frames are
+            size-matched like the normal SLEAP-NN inference path.
+        return_eff_scales: Return the size-matcher scale for each frame.
 
     Returns:
-        ``np.ndarray`` of shape ``(N, C, H, W)`` with dtype ``uint8``.
+        ``np.ndarray`` of shape ``(N, C, H, W)`` with dtype ``uint8``. If
+        ``return_eff_scales=True``, returns ``(batch, eff_scales)``.
     """
     frames = []
+    eff_scales = []
     for idx in frame_indices:
         frame = np.asarray(video[idx])
         if frame.ndim == 2:
@@ -55,8 +65,31 @@ def load_video_batch(video, frame_indices):
         if frame.dtype != np.uint8:
             frame = frame.astype(np.uint8)
         frame = np.transpose(frame, (2, 0, 1))  # HWC -> CHW
+        eff_scale = 1.0
+
+        if preprocessing_config is not None:
+            frame_t = torch.from_numpy(np.ascontiguousarray(frame)).unsqueeze(0)
+            frame_t, eff_scale = apply_sizematcher(
+                frame_t,
+                max_height=preprocessing_config.get("max_height"),
+                max_width=preprocessing_config.get("max_width"),
+            )
+            if preprocessing_config.get("ensure_rgb", False):
+                frame_t = convert_to_rgb(frame_t)
+            elif preprocessing_config.get("ensure_grayscale", False):
+                frame_t = convert_to_grayscale(frame_t)
+
+            frame = frame_t.squeeze(0).cpu().numpy()
+            if frame.dtype != np.uint8:
+                frame = np.clip(frame, 0, 255).astype(np.uint8)
+
         frames.append(frame)
-    return np.stack(frames, axis=0)
+        eff_scales.append(float(eff_scale))
+
+    batch = np.stack(frames, axis=0)
+    if return_eff_scales:
+        return batch, np.asarray(eff_scales, dtype=np.float32)
+    return batch
 
 
 # ---------------------------------------------------------------------------
@@ -64,7 +97,9 @@ def load_video_batch(video, frame_indices):
 # ---------------------------------------------------------------------------
 
 
-def _prefetch_video_batches(video, frame_indices, batch_size, prefetch_queue):
+def _prefetch_video_batches(
+    video, frame_indices, batch_size, prefetch_queue, preprocessing_config=None
+):
     """Decode video batches ahead of the producer in a background thread.
 
     Reads frames from a separate video handle and puts decoded batches onto
@@ -78,14 +113,20 @@ def _prefetch_video_batches(video, frame_indices, batch_size, prefetch_queue):
         batch_size: Number of frames per batch.
         prefetch_queue: ``queue.Queue`` to put ``(batch_array, batch_indices)``
             items onto.  A ``None`` sentinel is put at the end.
+        preprocessing_config: Optional video preprocessing settings.
     """
     import copy
 
     video_copy = copy.deepcopy(video)
     for start in range(0, len(frame_indices), batch_size):
         batch_indices = frame_indices[start : start + batch_size]
-        batch = load_video_batch(video_copy, batch_indices)
-        prefetch_queue.put((batch, batch_indices))
+        batch, eff_scales = load_video_batch(
+            video_copy,
+            batch_indices,
+            preprocessing_config=preprocessing_config,
+            return_eff_scales=True,
+        )
+        prefetch_queue.put((batch, batch_indices, eff_scales))
     prefetch_queue.put(None)  # sentinel
 
 
@@ -127,12 +168,72 @@ def _find_training_config_for_predict(export_dir: Path, model_type: str) -> Path
     )
 
 
+def _find_preprocessing_config_for_predict(export_dir: Path, model_type: str) -> Path:
+    """Find config that defines full-frame preprocessing for exported predict."""
+    if model_type in {"topdown", "multi_class_topdown_combined"}:
+        candidates = [
+            export_dir / "training_config_centroid.yaml",
+            export_dir / "training_config_centroid.json",
+        ]
+        for candidate in candidates:
+            if candidate.exists():
+                return candidate
+
+    return _find_training_config_for_predict(export_dir, model_type)
+
+
+def _load_config(path: Path):
+    """Load a SLEAP-NN training config from YAML or legacy JSON."""
+    if path.suffix in {".yaml", ".yml"}:
+        return OmegaConf.load(path.as_posix())
+
+    from sleap_nn.config.training_job_config import TrainingJobConfig
+
+    return TrainingJobConfig.load_sleap_config(path.as_posix())
+
+
+def _video_preprocessing_from_config(cfg) -> dict:
+    """Extract exported-video preprocessing settings from a training config."""
+    return {
+        "max_height": OmegaConf.select(
+            cfg, "data_config.preprocessing.max_height", default=None
+        ),
+        "max_width": OmegaConf.select(
+            cfg, "data_config.preprocessing.max_width", default=None
+        ),
+        "ensure_rgb": bool(
+            OmegaConf.select(cfg, "data_config.preprocessing.ensure_rgb", default=False)
+        ),
+        "ensure_grayscale": bool(
+            OmegaConf.select(
+                cfg, "data_config.preprocessing.ensure_grayscale", default=False
+            )
+        ),
+    }
+
+
+def _normalize_eff_scales(eff_scales, batch_size: int) -> np.ndarray:
+    """Return one coordinate-restoration scale per item in a batch."""
+    if eff_scales is None:
+        return np.ones(batch_size, dtype=np.float32)
+
+    eff_scales = np.asarray(eff_scales, dtype=np.float32)
+    if eff_scales.ndim == 0:
+        return np.full(batch_size, float(eff_scales), dtype=np.float32)
+    if len(eff_scales) != batch_size:
+        raise ValueError(
+            f"Expected {batch_size} eff_scale values, got {len(eff_scales)}."
+        )
+    return eff_scales
+
+
 def _predict_topdown_frames(
     outputs,
     frame_indices,
     video,
     skeleton,
     max_instances=None,
+    eff_scales=None,
 ):
     """Convert top-down model outputs to LabeledFrames."""
     labeled_frames = []
@@ -141,6 +242,7 @@ def _predict_topdown_frames(
     peaks = outputs["peaks"]
     peak_vals = outputs["peak_vals"]
     instance_valid = outputs["instance_valid"]
+    eff_scales = _normalize_eff_scales(eff_scales, len(frame_indices))
 
     for batch_idx, frame_idx in enumerate(frame_indices):
         instances = []
@@ -148,7 +250,7 @@ def _predict_topdown_frames(
         for inst_idx, is_valid in enumerate(valid_mask):
             if not is_valid:
                 continue
-            pts = peaks[batch_idx, inst_idx]
+            pts = peaks[batch_idx, inst_idx] / eff_scales[batch_idx]
             scores = peak_vals[batch_idx, inst_idx]
             score = float(centroid_vals[batch_idx, inst_idx])
             instances.append(
@@ -183,6 +285,7 @@ def _predict_multiclass_topdown_combined_frames(
     skeleton,
     class_names: list,
     max_instances=None,
+    eff_scales=None,
 ):
     """Convert combined multiclass top-down model outputs to LabeledFrames.
 
@@ -194,6 +297,7 @@ def _predict_multiclass_topdown_combined_frames(
         skeleton: sleap_io.Skeleton object.
         class_names: List of class names (e.g., ["female", "male"]).
         max_instances: Maximum instances per frame (None = n_classes).
+        eff_scales: Per-frame size-matcher scale to undo.
 
     Returns:
         List of LabeledFrame objects.
@@ -207,6 +311,7 @@ def _predict_multiclass_topdown_combined_frames(
     peak_vals = outputs["peak_vals"]
     class_logits = outputs["class_logits"]
     instance_valid = outputs["instance_valid"]
+    eff_scales = _normalize_eff_scales(eff_scales, len(frame_indices))
 
     n_classes = len(class_names)
 
@@ -218,7 +323,9 @@ def _predict_multiclass_topdown_combined_frames(
             continue
 
         # Gather valid instances
-        valid_peaks = peaks[batch_idx, valid_mask]  # (n_valid, n_nodes, 2)
+        valid_peaks = (
+            peaks[batch_idx, valid_mask] / eff_scales[batch_idx]
+        )  # (n_valid, n_nodes, 2)
         valid_peak_vals = peak_vals[batch_idx, valid_mask]  # (n_valid, n_nodes)
         valid_centroid_vals = centroid_vals[batch_idx, valid_mask]  # (n_valid,)
         valid_class_logits = class_logits[batch_idx, valid_mask]  # (n_valid, n_classes)
@@ -283,6 +390,7 @@ def _predict_bottomup_frames(
     input_scale,
     peak_conf_threshold=0.2,
     max_instances=None,
+    eff_scales=None,
 ):
     """Convert bottom-up model outputs to LabeledFrames."""
     labeled_frames = []
@@ -293,6 +401,7 @@ def _predict_bottomup_frames(
     candidate_mask = torch.from_numpy(outputs["candidate_mask"]).to(torch.bool)
 
     batch_size, n_nodes, k, _ = peaks.shape
+    eff_scales = _normalize_eff_scales(eff_scales, batch_size)
     peaks_flat = peaks.reshape(batch_size, n_nodes * k, 2)
     peak_vals_flat = peak_vals.reshape(batch_size, n_nodes * k)
 
@@ -357,7 +466,10 @@ def _predict_bottomup_frames(
         match_line_scores,
     )
 
-    predicted_instances = [p / input_scale for p in predicted_instances]
+    predicted_instances = [
+        p / (input_scale * float(eff_scales[idx]))
+        for idx, p in enumerate(predicted_instances)
+    ]
 
     for batch_idx, frame_idx in enumerate(frame_indices):
         instances = []
@@ -399,14 +511,16 @@ def _predict_single_instance_frames(
     frame_indices,
     video,
     skeleton,
+    eff_scales=None,
 ):
     """Convert single-instance model outputs to LabeledFrames."""
     labeled_frames = []
     peaks = outputs["peaks"]  # (batch, n_nodes, 2)
     peak_vals = outputs["peak_vals"]  # (batch, n_nodes)
+    eff_scales = _normalize_eff_scales(eff_scales, len(frame_indices))
 
     for batch_idx, frame_idx in enumerate(frame_indices):
-        pts = peaks[batch_idx]
+        pts = peaks[batch_idx] / eff_scales[batch_idx]
         scores = peak_vals[batch_idx]
 
         # Compute instance score as mean of valid peak values
@@ -441,6 +555,7 @@ def _predict_centroid_frames(
     skeleton,
     anchor_node_idx: int,
     max_instances=None,
+    eff_scales=None,
 ):
     """Convert centroid model outputs to LabeledFrames.
 
@@ -454,6 +569,7 @@ def _predict_centroid_frames(
         skeleton: sleap_io.Skeleton object.
         anchor_node_idx: Index of the anchor node in the skeleton.
         max_instances: Maximum instances to output per frame.
+        eff_scales: Per-frame size-matcher scale to undo.
 
     Returns:
         List of LabeledFrame objects.
@@ -462,6 +578,7 @@ def _predict_centroid_frames(
     centroids = outputs["centroids"]  # (batch, max_instances, 2)
     centroid_vals = outputs["centroid_vals"]  # (batch, max_instances)
     instance_valid = outputs["instance_valid"]  # (batch, max_instances)
+    eff_scales = _normalize_eff_scales(eff_scales, len(frame_indices))
 
     n_nodes = len(skeleton.nodes)
 
@@ -475,7 +592,9 @@ def _predict_centroid_frames(
 
             # Create points array with NaN for all nodes except anchor
             pts = np.full((n_nodes, 2), np.nan, dtype=np.float32)
-            pts[anchor_node_idx] = centroids[batch_idx, inst_idx]
+            pts[anchor_node_idx] = (
+                centroids[batch_idx, inst_idx] / eff_scales[batch_idx]
+            )
 
             # Create scores array - anchor gets centroid score, others get NaN
             scores = np.full((n_nodes,), np.nan, dtype=np.float32)
@@ -517,6 +636,7 @@ def _predict_multiclass_bottomup_frames(
     input_scale: float = 1.0,
     peak_conf_threshold: float = 0.2,
     max_instances: int = None,
+    eff_scales=None,
 ):
     """Convert bottom-up multiclass model outputs to LabeledFrames.
 
@@ -531,6 +651,7 @@ def _predict_multiclass_bottomup_frames(
         input_scale: Scale factor applied to input.
         peak_conf_threshold: Minimum peak confidence to include.
         max_instances: Maximum instances per frame (None = n_classes).
+        eff_scales: Per-frame size-matcher scale to undo.
 
     Returns:
         List of LabeledFrame objects.
@@ -546,6 +667,7 @@ def _predict_multiclass_bottomup_frames(
     class_probs = outputs["class_probs"]  # (batch, n_nodes, max_peaks, n_classes)
 
     batch_size, n_nodes, max_peaks, _ = peaks.shape
+    eff_scales = _normalize_eff_scales(eff_scales, batch_size)
     n_nodes_skel = len(skeleton.nodes)
 
     for batch_idx, frame_idx in enumerate(frame_indices):
@@ -580,7 +702,7 @@ def _predict_multiclass_bottomup_frames(
             for peak_idx, class_idx in zip(row_inds, col_inds):
                 if class_idx < n_classes:
                     instance_points[class_idx, node_idx] = (
-                        valid_peaks[peak_idx] / input_scale
+                        valid_peaks[peak_idx] / eff_scales[batch_idx]
                     )
                     instance_scores[class_idx, node_idx] = valid_vals[peak_idx]
                     instance_class_probs[class_idx] += valid_class_probs[
@@ -645,6 +767,7 @@ def _predict_bottomup_raw(
     input_scale,
     peak_conf_threshold=0.2,
     max_instances=None,
+    eff_scales=None,
 ):
     """Run bottom-up PAF grouping and return raw numpy arrays.
 
@@ -666,6 +789,7 @@ def _predict_bottomup_raw(
     candidate_mask = torch.from_numpy(outputs["candidate_mask"]).to(torch.bool)
 
     batch_size, n_nodes, k, _ = peaks.shape
+    eff_scales = _normalize_eff_scales(eff_scales, batch_size)
     peaks_flat = peaks.reshape(batch_size, n_nodes * k, 2)
     peak_vals_flat = peak_vals.reshape(batch_size, n_nodes * k)
 
@@ -747,7 +871,10 @@ def _predict_bottomup_raw(
 
     _t3 = time.perf_counter()
 
-    predicted_instances = [p / input_scale for p in predicted_instances]
+    predicted_instances = [
+        p / (input_scale * float(eff_scales[idx]))
+        for idx, p in enumerate(predicted_instances)
+    ]
 
     results = []
     for batch_idx, frame_idx in enumerate(frame_indices):
@@ -824,7 +951,8 @@ def _bottomup_postprocess_worker(
     Exits when it receives None (sentinel).
 
     Args:
-        gpu_output_queue: Queue of (seq_id, outputs_dict, batch_indices) or None.
+        gpu_output_queue: Queue of (seq_id, outputs_dict, batch_indices,
+            eff_scales) or None.
         result_queue: Queue of (seq_id, results_list).
         paf_scorer_kwargs: Dict of kwargs to construct PAFScorer directly.
         candidate_template_data: Dict with numpy arrays for candidate template.
@@ -884,7 +1012,7 @@ def _bottomup_postprocess_worker(
                 break
 
             try:
-                seq_id, outputs, batch_indices = item
+                seq_id, outputs, batch_indices, eff_scales = item
 
                 # Measure payload size (bytes pickled through mp.Queue)
                 payload_bytes = sum(v.nbytes for v in outputs.values())
@@ -898,6 +1026,7 @@ def _bottomup_postprocess_worker(
                     input_scale,
                     peak_conf_threshold,
                     max_instances,
+                    eff_scales=eff_scales,
                 )
                 t_proc_end = time.perf_counter()
 
@@ -1002,6 +1131,7 @@ def _run_bottomup_pipelined(
     peak_conf_threshold,
     max_instances,
     cpu_workers,
+    preprocessing_config=None,
     progress_callback=None,
 ):
     """Run bottom-up inference with pipelined GPU producer + CPU consumer workers.
@@ -1024,6 +1154,7 @@ def _run_bottomup_pipelined(
         peak_conf_threshold: Float confidence threshold.
         max_instances: Optional int max instances per frame.
         cpu_workers: Number of CPU worker processes.
+        preprocessing_config: Optional video preprocessing settings.
         progress_callback: Optional callable(processed, total) for progress.
 
     Returns:
@@ -1092,7 +1223,7 @@ def _run_bottomup_pipelined(
     prefetch_queue = queue.Queue(maxsize=2)
     prefetch_thread = Thread(
         target=_prefetch_video_batches,
-        args=(video, frame_indices, batch_size, prefetch_queue),
+        args=(video, frame_indices, batch_size, prefetch_queue, preprocessing_config),
         daemon=True,
     )
     prefetch_thread.start()
@@ -1107,7 +1238,7 @@ def _run_bottomup_pipelined(
             t_fetch_end = time.perf_counter()
             if item is None:
                 break
-            batch, batch_indices = item
+            batch, batch_indices, eff_scales = item
 
             infer_start = time.perf_counter()
             outputs = predictor.predict(batch)
@@ -1115,7 +1246,7 @@ def _run_bottomup_pipelined(
             infer_time += infer_end - infer_start
 
             t_put_start = time.perf_counter()
-            gpu_output_queue.put((total_batches, outputs, batch_indices))
+            gpu_output_queue.put((total_batches, outputs, batch_indices, eff_scales))
             t_put_end = time.perf_counter()
 
             if _profile_dir:
@@ -1320,14 +1451,16 @@ def predict(
     else:
         raise ValueError(f"Unknown runtime: {runtime}")
 
-    # Load training config for skeleton
+    # Load training config for skeleton and full-frame preprocessing.
     cfg_path = _find_training_config_for_predict(export_dir, metadata.model_type)
-    if cfg_path.suffix in {".yaml", ".yml"}:
-        cfg = OmegaConf.load(cfg_path.as_posix())
-    else:
-        from sleap_nn.config.training_job_config import TrainingJobConfig
-
-        cfg = TrainingJobConfig.load_sleap_config(cfg_path.as_posix())
+    cfg = _load_config(cfg_path)
+    preprocess_cfg_path = _find_preprocessing_config_for_predict(
+        export_dir, metadata.model_type
+    )
+    preprocess_cfg = (
+        cfg if preprocess_cfg_path == cfg_path else _load_config(preprocess_cfg_path)
+    )
+    video_preprocessing_config = _video_preprocessing_from_config(preprocess_cfg)
     skeletons = get_skeleton_from_config(cfg.data_config.skeletons)
     skeleton = skeletons[0]
 
@@ -1400,12 +1533,18 @@ def predict(
             peak_conf_threshold=peak_conf_threshold,
             max_instances=max_instances,
             cpu_workers=cpu_workers,
+            preprocessing_config=video_preprocessing_config,
             progress_callback=progress_callback,
         )
     else:
         for start in range(0, len(frame_indices), batch_size):
             batch_indices = frame_indices[start : start + batch_size]
-            batch = load_video_batch(video, batch_indices)
+            batch, eff_scales = load_video_batch(
+                video,
+                batch_indices,
+                preprocessing_config=video_preprocessing_config,
+                return_eff_scales=True,
+            )
 
             infer_start = time.perf_counter()
             outputs = predictor.predict(batch)
@@ -1420,6 +1559,7 @@ def predict(
                         video,
                         skeleton,
                         max_instances=max_instances,
+                        eff_scales=eff_scales,
                     )
                 )
             elif metadata.model_type == "bottomup":
@@ -1434,6 +1574,7 @@ def predict(
                         input_scale=metadata.input_scale,
                         peak_conf_threshold=peak_conf_threshold,
                         max_instances=max_instances,
+                        eff_scales=eff_scales,
                     )
                 )
             elif metadata.model_type == "single_instance":
@@ -1443,6 +1584,7 @@ def predict(
                         batch_indices,
                         video,
                         skeleton,
+                        eff_scales=eff_scales,
                     )
                 )
             elif metadata.model_type == "centroid":
@@ -1454,6 +1596,7 @@ def predict(
                         skeleton,
                         anchor_node_idx=anchor_node_idx,
                         max_instances=max_instances,
+                        eff_scales=eff_scales,
                     )
                 )
             elif metadata.model_type == "multi_class_bottomup":
@@ -1467,6 +1610,7 @@ def predict(
                         input_scale=metadata.input_scale,
                         peak_conf_threshold=peak_conf_threshold,
                         max_instances=max_instances,
+                        eff_scales=eff_scales,
                     )
                 )
             elif metadata.model_type == "multi_class_topdown_combined":
@@ -1478,6 +1622,7 @@ def predict(
                         skeleton,
                         class_names=metadata.class_names or [],
                         max_instances=max_instances,
+                        eff_scales=eff_scales,
                     )
                 )
             else:
