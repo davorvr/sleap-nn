@@ -73,6 +73,48 @@ class TestLoadVideoBatch:
         assert result.shape == (1, 1, 32, 32)
         assert result[0, 0, 0, 0] == 128
 
+    def test_preprocessing_size_match_returns_eff_scale(self):
+        """Exported predict size-matches video frames before engine inference."""
+
+        class DummyVideo:
+            def __getitem__(self, idx):
+                return np.ones((10, 10, 1), dtype=np.uint8)
+
+        batch, eff_scales = load_video_batch(
+            DummyVideo(),
+            [0],
+            preprocessing_config={
+                "max_height": 20,
+                "max_width": 30,
+                "ensure_rgb": False,
+                "ensure_grayscale": False,
+            },
+            return_eff_scales=True,
+        )
+
+        assert batch.shape == (1, 1, 20, 30)
+        np.testing.assert_allclose(eff_scales, [2.0])
+
+    def test_preprocessing_channel_conversion(self):
+        """Exported predict applies configured channel conversion."""
+
+        class DummyVideo:
+            def __getitem__(self, idx):
+                return np.ones((8, 8, 1), dtype=np.uint8)
+
+        batch = load_video_batch(
+            DummyVideo(),
+            [0],
+            preprocessing_config={
+                "max_height": None,
+                "max_width": None,
+                "ensure_rgb": True,
+                "ensure_grayscale": False,
+            },
+        )
+
+        assert batch.shape == (1, 3, 8, 8)
+
 
 # =============================================================================
 # TestFindTrainingConfig
@@ -168,6 +210,26 @@ class TestPredictSingleInstanceFrames:
         )
         assert len(frames) == 1
         assert frames[0].instances[0].score == 0.0
+
+    def test_eff_scale_restores_original_frame_coords(
+        self, simple_skeleton, simple_video
+    ):
+        """Size-matcher scales are undone in exported postprocessing."""
+        peaks = np.array([[[20.0, 40.0], [30.0, 60.0], [50.0, 80.0]]])
+        peak_vals = np.array([[0.9, 0.6, 0.3]])
+        outputs = {"peaks": peaks, "peak_vals": peak_vals}
+
+        frames = _predict_single_instance_frames(
+            outputs,
+            [0],
+            simple_video,
+            simple_skeleton,
+            eff_scales=np.array([2.0], dtype=np.float32),
+        )
+
+        np.testing.assert_allclose(
+            frames[0].instances[0].numpy()[:, :2], peaks[0] / 2.0, atol=1e-5
+        )
 
 
 # =============================================================================
@@ -892,7 +954,7 @@ class TestBottomupPostprocessWorker:
         gpu_output_queue = queue.Queue()
         result_queue = queue.Queue()
 
-        gpu_output_queue.put((0, outputs, [0]))
+        gpu_output_queue.put((0, outputs, [0], np.array([1.0], dtype=np.float32)))
         gpu_output_queue.put(None)  # sentinel
 
         _bottomup_postprocess_worker(
