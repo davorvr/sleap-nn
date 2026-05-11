@@ -29,6 +29,7 @@ class BottomUpONNXWrapper(BaseExportWrapper):
         max_edge_length_ratio: float = 0.25,
         dist_penalty_weight: float = 1.0,
         input_scale: float = 1.0,
+        max_stride: int = 1,
         peak_threshold: float = 0.2,
     ) -> None:
         """Initialize bottom-up ONNX wrapper.
@@ -44,6 +45,7 @@ class BottomUpONNXWrapper(BaseExportWrapper):
             max_edge_length_ratio: Maximum edge length as ratio of image size.
             dist_penalty_weight: Weight for distance penalty in scoring.
             input_scale: Input scaling factor.
+            max_stride: Pad scaled input dimensions to this stride.
             peak_threshold: Minimum confidence for a peak to be considered valid.
         """
         super().__init__(model)
@@ -56,6 +58,7 @@ class BottomUpONNXWrapper(BaseExportWrapper):
         self.max_edge_length_ratio = max_edge_length_ratio
         self.dist_penalty_weight = dist_penalty_weight
         self.input_scale = input_scale
+        self.max_stride = max_stride
         self.peak_threshold = peak_threshold
 
         edge_src = torch.tensor([e[0] for e in skeleton_edges], dtype=torch.long)
@@ -73,12 +76,7 @@ class BottomUpONNXWrapper(BaseExportWrapper):
         Peak detection and PAF scoring are performed on GPU within this wrapper.
         """
         image = self._normalize_uint8(image)
-        if self.input_scale != 1.0:
-            height = int(image.shape[-2] * self.input_scale)
-            width = int(image.shape[-1] * self.input_scale)
-            image = F.interpolate(
-                image, size=(height, width), mode="bilinear", align_corners=False
-            )
+        image = self._resize_and_pad(image, self.input_scale, self.max_stride)
 
         batch_size, _, height, width = image.shape
 

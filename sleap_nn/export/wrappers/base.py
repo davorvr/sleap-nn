@@ -29,6 +29,31 @@ class BaseExportWrapper(nn.Module):
         return image / 255.0
 
     @staticmethod
+    def _resize_and_pad(
+        image: torch.Tensor, input_scale: float = 1.0, max_stride: int = 1
+    ) -> torch.Tensor:
+        """Resize then right/bottom-pad an image like training preprocessing."""
+        if input_scale != 1.0:
+            height = int(image.shape[-2] * input_scale)
+            width = int(image.shape[-1] * input_scale)
+            image = F.interpolate(
+                image, size=(height, width), mode="bilinear", align_corners=False
+            )
+
+        if max_stride > 1:
+            image_height, image_width = image.shape[-2:]
+            pad_height = (max_stride - (image_height % max_stride)) % max_stride
+            pad_width = (max_stride - (image_width % max_stride)) % max_stride
+            if pad_height > 0 or pad_width > 0:
+                image = F.pad(
+                    image,
+                    (0, pad_width, 0, pad_height),
+                    mode="constant",
+                )
+
+        return image
+
+    @staticmethod
     def _extract_tensor(output, key_hints: Iterable[str]) -> torch.Tensor:
         if isinstance(output, dict):
             for key in output:
