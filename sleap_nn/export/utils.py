@@ -168,6 +168,13 @@ def resolve_backbone_type(cfg: DictConfig) -> str:
     return get_backbone_type_from_cfg(cfg)
 
 
+def resolve_max_stride(cfg: DictConfig) -> int:
+    """Resolve backbone max_stride from config."""
+    backbone_type = resolve_backbone_type(cfg)
+    backbone_cfg = cfg.model_config.backbone_config[backbone_type]
+    return int(getattr(backbone_cfg, "max_stride", 1) or 1)
+
+
 def resolve_anchor_part(cfg: DictConfig, model_type: str) -> Optional[str]:
     """Resolve anchor_part from config for centroid and centered_instance models.
 

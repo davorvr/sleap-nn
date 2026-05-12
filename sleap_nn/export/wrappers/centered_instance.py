@@ -6,8 +6,6 @@ from typing import Dict
 
 import torch
 from torch import nn
-from torch.nn import functional as F
-
 from sleap_nn.export.wrappers.base import BaseExportWrapper
 
 
@@ -22,6 +20,7 @@ class CenteredInstanceONNXWrapper(BaseExportWrapper):
         model: nn.Module,
         output_stride: int = 4,
         input_scale: float = 1.0,
+        max_stride: int = 1,
         peak_threshold: float = 0.2,
     ):
         """Initialize centered instance ONNX wrapper.
@@ -30,22 +29,19 @@ class CenteredInstanceONNXWrapper(BaseExportWrapper):
             model: Centered instance model for pose estimation.
             output_stride: Output stride for confidence maps.
             input_scale: Input scaling factor.
+            max_stride: Pad scaled input dimensions to this stride.
             peak_threshold: Minimum confidence for a peak to be considered valid.
         """
         super().__init__(model)
         self.output_stride = output_stride
         self.input_scale = input_scale
+        self.max_stride = max_stride
         self.peak_threshold = peak_threshold
 
     def forward(self, image: torch.Tensor) -> Dict[str, torch.Tensor]:
         """Run centered-instance inference on crops."""
         image = self._normalize_uint8(image)
-        if self.input_scale != 1.0:
-            height = int(image.shape[-2] * self.input_scale)
-            width = int(image.shape[-1] * self.input_scale)
-            image = F.interpolate(
-                image, size=(height, width), mode="bilinear", align_corners=False
-            )
+        image = self._resize_and_pad(image, self.input_scale, self.max_stride)
 
         confmaps = self._extract_tensor(
             self.model(image), ["centered", "instance", "confmap"]

@@ -30,6 +30,7 @@ class TopDownMultiClassONNXWrapper(BaseExportWrapper):
         model: nn.Module,
         output_stride: int = 2,
         input_scale: float = 1.0,
+        max_stride: int = 1,
         n_classes: int = 2,
         peak_threshold: float = 0.2,
     ):
@@ -39,12 +40,14 @@ class TopDownMultiClassONNXWrapper(BaseExportWrapper):
             model: The underlying PyTorch model.
             output_stride: Output stride of the confidence maps.
             input_scale: Scale factor for input images.
+            max_stride: Pad scaled input dimensions to this stride.
             n_classes: Number of identity classes (e.g., 2 for male/female).
             peak_threshold: Minimum confidence for a peak to be considered valid.
         """
         super().__init__(model)
         self.output_stride = output_stride
         self.input_scale = input_scale
+        self.max_stride = max_stride
         self.n_classes = n_classes
         self.peak_threshold = peak_threshold
 
@@ -67,13 +70,7 @@ class TopDownMultiClassONNXWrapper(BaseExportWrapper):
         # Normalize uint8 [0, 255] to float32 [0, 1]
         image = self._normalize_uint8(image)
 
-        # Apply input scaling if needed
-        if self.input_scale != 1.0:
-            height = int(image.shape[-2] * self.input_scale)
-            width = int(image.shape[-1] * self.input_scale)
-            image = F.interpolate(
-                image, size=(height, width), mode="bilinear", align_corners=False
-            )
+        image = self._resize_and_pad(image, self.input_scale, self.max_stride)
 
         # Forward pass
         out = self.model(image)
@@ -117,6 +114,8 @@ class TopDownMultiClassCombinedONNXWrapper(BaseExportWrapper):
         instance_output_stride: int = 2,
         centroid_input_scale: float = 1.0,
         instance_input_scale: float = 1.0,
+        centroid_max_stride: int = 1,
+        instance_max_stride: int = 1,
         n_nodes: int = 13,
         n_classes: int = 2,
         centroid_peak_threshold: float = 0.2,
@@ -133,6 +132,8 @@ class TopDownMultiClassCombinedONNXWrapper(BaseExportWrapper):
             instance_output_stride: Output stride of instance model.
             centroid_input_scale: Input scale for centroid model.
             instance_input_scale: Input scale for instance model.
+            centroid_max_stride: Pad centroid input dimensions to this stride.
+            instance_max_stride: Pad instance input dimensions to this stride.
             n_nodes: Number of keypoint nodes per instance.
             n_classes: Number of identity classes.
             centroid_peak_threshold: Minimum confidence for centroid peaks.
@@ -146,6 +147,8 @@ class TopDownMultiClassCombinedONNXWrapper(BaseExportWrapper):
         self.instance_output_stride = instance_output_stride
         self.centroid_input_scale = centroid_input_scale
         self.instance_input_scale = instance_input_scale
+        self.centroid_max_stride = centroid_max_stride
+        self.instance_max_stride = instance_max_stride
         self.n_nodes = n_nodes
         self.n_classes = n_classes
         self.centroid_peak_threshold = centroid_peak_threshold
@@ -179,17 +182,9 @@ class TopDownMultiClassCombinedONNXWrapper(BaseExportWrapper):
         image = self._normalize_uint8(image)
         batch_size, channels, height, width = image.shape
 
-        # Apply centroid input scaling
-        scaled_image = image
-        if self.centroid_input_scale != 1.0:
-            scaled_h = int(height * self.centroid_input_scale)
-            scaled_w = int(width * self.centroid_input_scale)
-            scaled_image = F.interpolate(
-                scaled_image,
-                size=(scaled_h, scaled_w),
-                mode="bilinear",
-                align_corners=False,
-            )
+        scaled_image = self._resize_and_pad(
+            image, self.centroid_input_scale, self.centroid_max_stride
+        )
 
         # Centroid detection
         centroid_out = self.model(scaled_image)
@@ -210,16 +205,9 @@ class TopDownMultiClassCombinedONNXWrapper(BaseExportWrapper):
             self.crop_size[1],
         )
 
-        # Apply instance input scaling if needed
-        if self.instance_input_scale != 1.0:
-            scaled_h = int(self.crop_size[0] * self.instance_input_scale)
-            scaled_w = int(self.crop_size[1] * self.instance_input_scale)
-            crops_flat = F.interpolate(
-                crops_flat,
-                size=(scaled_h, scaled_w),
-                mode="bilinear",
-                align_corners=False,
-            )
+        crops_flat = self._resize_and_pad(
+            crops_flat, self.instance_input_scale, self.instance_max_stride
+        )
 
         # Instance model forward (batch all crops)
         instance_out = self.instance_model(crops_flat)

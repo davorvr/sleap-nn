@@ -289,6 +289,20 @@ class TestResolveOutputStride:
         assert stride >= 1
 
 
+class TestResolveMaxStride:
+    """Tests for resolve_max_stride function."""
+
+    def test_resolve_max_stride(self, minimal_instance_single_instance_ckpt):
+        """Test extracting max_stride from backbone config."""
+        from sleap_nn.export.utils import load_training_config, resolve_max_stride
+
+        cfg = load_training_config(minimal_instance_single_instance_ckpt)
+        stride = resolve_max_stride(cfg)
+
+        assert isinstance(stride, int)
+        assert stride >= 1
+
+
 class TestResolveNodeNames:
     """Tests for resolve_node_names function."""
 

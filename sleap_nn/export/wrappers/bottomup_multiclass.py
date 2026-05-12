@@ -43,6 +43,7 @@ class BottomUpMultiClassONNXWrapper(BaseExportWrapper):
         cms_output_stride: int = 4,
         class_maps_output_stride: int = 8,
         input_scale: float = 1.0,
+        max_stride: int = 1,
         peak_threshold: float = 0.2,
     ):
         """Initialize the wrapper.
@@ -55,6 +56,7 @@ class BottomUpMultiClassONNXWrapper(BaseExportWrapper):
             cms_output_stride: Output stride of confidence maps.
             class_maps_output_stride: Output stride of class maps.
             input_scale: Scale factor for input images.
+            max_stride: Pad scaled input dimensions to this stride.
             peak_threshold: Minimum confidence for a peak to be considered valid.
         """
         super().__init__(model)
@@ -64,6 +66,7 @@ class BottomUpMultiClassONNXWrapper(BaseExportWrapper):
         self.cms_output_stride = cms_output_stride
         self.class_maps_output_stride = class_maps_output_stride
         self.input_scale = input_scale
+        self.max_stride = max_stride
         self.peak_threshold = peak_threshold
 
     def forward(self, image: torch.Tensor) -> Dict[str, torch.Tensor]:
@@ -88,13 +91,7 @@ class BottomUpMultiClassONNXWrapper(BaseExportWrapper):
         # Normalize uint8 [0, 255] to float32 [0, 1]
         image = self._normalize_uint8(image)
 
-        # Apply input scaling if needed
-        if self.input_scale != 1.0:
-            height = int(image.shape[-2] * self.input_scale)
-            width = int(image.shape[-1] * self.input_scale)
-            image = F.interpolate(
-                image, size=(height, width), mode="bilinear", align_corners=False
-            )
+        image = self._resize_and_pad(image, self.input_scale, self.max_stride)
 
         batch_size = image.shape[0]
 
